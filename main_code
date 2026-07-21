@@ -1,0 +1,159 @@
+clc;
+clear;
+close all;
+
+%% -------- STEP 1: SELECT INPUT --------
+[file, path] = uigetfile({'*.jpg;*.png;*.jpeg;*.mp4;*.avi'}, 'Select Image or Video');
+
+if isequal(file,0)
+    disp('No file selected');
+    return;
+end
+
+filepath = fullfile(path, file);
+
+%% -------- STEP 2: LOAD YOLO --------
+detector = yolov4ObjectDetector("csp-darknet53-coco");
+
+%% -------- STEP 3: CHECK FILE TYPE --------
+[~,~,ext] = fileparts(file);
+
+isImage = ismember(lower(ext), {'.jpg','.png','.jpeg'});
+isVideo = ismember(lower(ext), {'.mp4','.avi'});
+
+figure;
+
+%% ================= IMAGE MODE =================
+if isImage
+    
+    img = imread(filepath);
+    result = processFrame(img, detector);
+    
+    imshow(result);
+    title('Image Detection');
+
+%% ================= VIDEO MODE =================
+elseif isVideo
+    
+    v = VideoReader(filepath);
+    
+    while hasFrame(v)
+        img = readFrame(v);
+        result = processFrame(img, detector);
+        
+        imshow(result);
+        drawnow;
+    end
+
+%% ================= CAMERA MODE =================
+else
+    cam = webcam;
+    
+    while true
+        img = snapshot(cam);
+        result = processFrame(img, detector);
+        
+        imshow(result);
+        drawnow;
+    end
+end
+
+%% ================= FUNCTION =================
+function result = processFrame(img, detector)
+
+result = img;
+
+%% DETECTION
+[bboxes, scores, labels] = detect(detector, img);
+
+%% VEHICLE FILTER
+vehicleIdx = ismember(labels, ["car","truck","bus","motorbike"]);
+bboxes = bboxes(vehicleIdx,:);
+labels = labels(vehicleIdx);
+
+n = size(bboxes,1);
+
+if n < 1
+    return;
+end
+
+%% CENTERS
+centers = [bboxes(:,1)+bboxes(:,3)/2, ...
+           bboxes(:,2)+bboxes(:,4)/2];
+
+x_center = centers(:,1);
+y_bottom = bboxes(:,2) + bboxes(:,4);
+
+%% LANE FILTER
+img_center_x = size(img,2)/2;
+lane_width = 150;
+
+front_candidates = [];
+
+for i = 1:n
+    if abs(x_center(i) - img_center_x) < lane_width
+        front_candidates = [front_candidates; i];
+    end
+end
+
+if isempty(front_candidates)
+    return;
+end
+
+%% NEAREST VEHICLE
+[~, idx] = max(y_bottom(front_candidates));
+front_idx = front_candidates(idx);
+
+front_box = bboxes(front_idx,:);
+
+%% DISTANCE
+ego_point = [img_center_x, size(img,1)];
+front_point = [front_box(1)+front_box(3)/2, ...
+               front_box(2)+front_box(4)];
+
+dx = ego_point(1) - front_point(1);
+dy = ego_point(2) - front_point(2);
+
+gap_px = sqrt(dx^2 + dy^2);
+
+%% CONVERT TO METERS
+ref_width_px = front_box(3);
+real_width_m = 1.8;
+
+meters_per_px = real_width_m / ref_width_px;
+gap_m = gap_px * meters_per_px;
+
+%% COLLISION LOGIC
+threshold_m = 3;
+
+if gap_m < threshold_m
+    status = "DANGER";
+    color = 'red';
+else
+    status = "SAFE";
+    color = 'green';
+end
+
+%% DRAW ALL VEHICLES
+for i = 1:n
+    result = insertShape(result,'Rectangle',bboxes(i,:), ...
+        'Color','green','LineWidth',2);
+end
+
+%% FRONT VEHICLE
+result = insertShape(result,'Rectangle',front_box, ...
+    'Color',color,'LineWidth',4);
+
+%% LINE
+result = insertShape(result,'Line',[ego_point front_point], ...
+    'Color','cyan','LineWidth',3);
+
+%% TEXT
+result = insertText(result, front_point, ...
+    "Gap: " + string(round(gap_m,2)) + " m", ...
+    'BoxColor','yellow');
+
+result = insertText(result,[50 50], status, ...
+    'FontSize',25,'BoxColor',color,'TextColor','white');
+
+end
